@@ -39,7 +39,7 @@
     }
   },
   "peerDependencies": {
-    "openclaw": ">=2026.4.1"
+    "openclaw": ">=2026.6.5"
   },
   "devDependencies": {
     "@types/jest": "^30.0.0",
