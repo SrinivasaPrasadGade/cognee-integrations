@@ -80,8 +80,12 @@ def _has_cognee() -> bool:
 
 
 def _safe_session_component(value: str) -> str:
-    cleaned = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in value)
-    return cleaned.strip("_") or "session"
+    # Sanitization kept consistent with the other integrations' session-id helpers
+    # (claude-code/codex `_sanitize_session_key`, openclaw `sanitizeSessionKey`):
+    # keep alphanumerics plus `-` `_` `.`, replace others with `_`, trim `._` ends,
+    # cap length at 120.
+    safe = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in value)
+    return safe.strip("._")[:120] or "session"
 
 
 def _format_turn(user_content: str, assistant_content: str) -> str:
@@ -535,16 +539,11 @@ class CogneeMemoryProvider(MemoryProvider):
         self._bridge.shutdown()
 
     def _build_cognee_session_id(self, session_id: str, **kwargs) -> str:
+        # Convention across integrations: "{agent}_{native_session_id}" —
+        # e.g. hermes_<hermes-session-id>. (kwargs like agent_workspace/user_id are
+        # accepted for call-site compatibility but no longer embedded in the name.)
         prefix = str(self._config.get("session_prefix") or "hermes")
-        workspace = str(kwargs.get("agent_workspace") or "")
-        user_id = str(kwargs.get("user_id") or "")
-        parts = [prefix]
-        if workspace:
-            parts.append(_safe_session_component(workspace))
-        if user_id:
-            parts.append(_safe_session_component(user_id))
-        parts.append(_safe_session_component(session_id))
-        return "_".join(parts)
+        return f"{prefix}_{_safe_session_component(session_id)}"
 
     def _session_cognee_id_for(self, session_id: str) -> str:
         if not session_id or session_id == self._session_id:
