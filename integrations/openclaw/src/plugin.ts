@@ -809,9 +809,11 @@ const memoryCogneePlugin = {
             agentSessionName,
             sessionId: ctx.sessionId,
             datasetNames: resolveAgentDatasetNames(ctx.agentId),
-          }).then(({ ok, connectionId }) => {
-            api.logger.info?.(`cognee-openclaw: agent registered (ok=${ok}${connectionId ? ` connectionId=${connectionId}` : ""})`);
+          }).then(({ connectionId }) => {
+            api.logger.info?.(`cognee-openclaw: agent registered${connectionId ? ` connectionId=${connectionId}` : ""}`);
           }).catch((e: unknown) => {
+            registeredSessions.delete(regKey);
+            agentSessionNames.delete(regKey);
             api.logger.warn?.(`cognee-openclaw: agent register failed: ${String(e)}`);
           });
         }

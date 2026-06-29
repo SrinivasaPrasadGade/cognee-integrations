@@ -78,17 +78,6 @@ const ENSURE_SCRIPT_CONTENT = [
   "    try:",
   "        import shutil",
   "        uv = UV_BIN if os.path.exists(UV_BIN) else (shutil.which('uv') or '')",
-  "        if not uv:",
-  "            try:",
-  "                uv_env = os.environ.copy()",
-  "                uv_env['UV_UNMANAGED_INSTALL'] = UV_DIR",
-  "                os.makedirs(UV_DIR, exist_ok=True)",
-  "                subprocess.run(",
-  "                    ['sh', '-c', 'curl -LsSf https://astral.sh/uv/install.sh | sh'],",
-  "                    env=uv_env, check=True, capture_output=True, timeout=120,",
-  "                )",
-  "                if os.path.exists(UV_BIN): uv = UV_BIN",
-  "            except Exception: pass",
   "        if uv:",
   "            uv_env = os.environ.copy()",
   "            if not os.path.exists(VENV_PYTHON):",
@@ -187,7 +176,10 @@ export async function bootServerIfNeeded(
   let port = 8011;
   try {
     const parsed = new URL(baseUrl);
-    if (parsed.port) port = parseInt(parsed.port, 10);
+    if (parsed.port) {
+      const p = parseInt(parsed.port, 10);
+      if (Number.isFinite(p) && p > 0) port = p;
+    }
   } catch { /* keep default */ }
 
   const python = findSystemPython();
