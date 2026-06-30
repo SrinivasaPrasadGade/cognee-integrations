@@ -834,11 +834,12 @@ const memoryCogneePlugin = {
           registeredSessions.add(regKey);
           const agentSessionName = `${ctx.sessionId}-${normalizeAgentId(ctx.agentId, cfg)}`;
           agentSessionNames.set(regKey, agentSessionName);
-          client.registerAgent({
-            agentSessionName,
-            sessionId: ctx.sessionId,
-            datasetNames: resolveAgentDatasetNames(ctx.agentId),
-          }).then(({ connectionId }) => {
+          try {
+            const { connectionId } = await client.registerAgent({
+              agentSessionName,
+              sessionId: ctx.sessionId,
+              datasetNames: resolveAgentDatasetNames(ctx.agentId),
+            });
             api.logger.info?.(`cognee-openclaw: agent registered${connectionId ? ` connectionId=${connectionId}` : ""}`);
             spawnExitWatcher({
               gatewayPid: process.pid,
@@ -848,11 +849,11 @@ const memoryCogneePlugin = {
               pidfilePath: exitWatcherPidfilePath(agentSessionName),
               logger: api.logger,
             }).catch(() => {});
-          }).catch((e: unknown) => {
+          } catch (e: unknown) {
             registeredSessions.delete(regKey);
             agentSessionNames.delete(regKey);
             api.logger.warn?.(`cognee-openclaw: agent register failed: ${String(e)}`);
-          });
+          }
         }
       }
     });
