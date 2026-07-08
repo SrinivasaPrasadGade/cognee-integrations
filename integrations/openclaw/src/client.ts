@@ -509,6 +509,11 @@ export class CogneeHttpClient {
   // POST /api/v1/recall — Cognee 1.0.3's memory-oriented alias for /search.
   // Mirrors the search payload but adds session_id + scope, so results can
   // mix session-cache hits with graph hits when sessions are enabled.
+  //
+  // only_context defaults to true (same as the claude-code/codex plugins):
+  // the server returns the retrieved context and SKIPS the LLM completion
+  // step, which dominates recall latency in the *_COMPLETION search types.
+  // Injected memories should be stored context, not generated answers.
   async recall(params: {
     queryText: string;
     searchPrompt: string;
@@ -517,22 +522,57 @@ export class CogneeHttpClient {
     topK?: number;
     sessionId?: string;
     scope?: string | string[];
+    onlyContext?: boolean;
+    /** Per-call timeout for the prompt hot path. When set, retries are
+     *  disabled so a slow server fails fast instead of eating the budget. */
+    timeoutMs?: number;
   }): Promise<CogneeSearchResult[]> {
     const recallPath = this.isCloud ? "/recall" : "/api/v1/recall";
-    const data = await this.fetchAPI<unknown>(recallPath, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        query: params.queryText,
-        search_type: params.searchType,
-        dataset_ids: params.datasetIds,
-        ...(typeof params.topK === "number" ? { top_k: params.topK } : {}),
-        ...(params.searchPrompt ? { system_prompt: params.searchPrompt } : {}),
-        ...(params.sessionId ? { session_id: params.sessionId } : {}),
-        ...(params.scope ? { scope: params.scope } : {}),
-      }),
-    });
+    const data = await this.fetchAPI<unknown>(
+      recallPath,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          query: params.queryText,
+          search_type: params.searchType,
+          dataset_ids: params.datasetIds,
+          only_context: params.onlyContext ?? true,
+          ...(typeof params.topK === "number" ? { top_k: params.topK } : {}),
+          ...(params.searchPrompt ? { system_prompt: params.searchPrompt } : {}),
+          ...(params.sessionId ? { session_id: params.sessionId } : {}),
+          ...(params.scope ? { scope: params.scope } : {}),
+        }),
+      },
+      params.timeoutMs ?? this.timeoutMs,
+      undefined,
+      params.timeoutMs ? 0 : undefined,
+    );
     return normalizeSearchResults(data);
+  }
+
+  // POST /api/v1/remember/entry — store a typed QA/trace entry in the server's
+  // session cache. Same contract as the claude-code/codex plugins'
+  // remember_entry_via_http: body is { entry, dataset_name, session_id }.
+  async rememberEntry(params: {
+    datasetName: string;
+    sessionId: string;
+    entry: Record<string, unknown>;
+  }): Promise<{ entryId?: string }> {
+    const result = await this.fetchAPI<Record<string, unknown>>(
+      "/api/v1/remember/entry",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          entry: params.entry,
+          dataset_name: params.datasetName,
+          session_id: params.sessionId,
+        }),
+      },
+      30_000,
+    );
+    return { entryId: typeof result.entry_id === "string" ? result.entry_id : undefined };
   }
 
   async registerAgent(params: {

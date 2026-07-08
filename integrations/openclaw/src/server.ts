@@ -25,7 +25,7 @@ const ENSURE_SCRIPT_CONTENT = [
   "UV_BIN = os.path.join(UV_DIR, 'uv' + _ext)",
   "READY_MARKER = os.path.join(BASE, '.venv-ready.json')",
   "INSTALL_LOCK = os.path.join(BASE, 'venv-install.lock')",
-  "COGNEE_VERSION = '1.2.2'",
+  "COGNEE_VERSION = '1.2.2.dev3'",
   "",
   "# Self-daemonize so the caller returns immediately.",
   "if '--daemon' not in sys.argv:",
@@ -299,17 +299,34 @@ const EXIT_WATCHER_CONTENT = [
   "    try: return int(open(path).read().strip()) == os.getpid()",
   "    except Exception: return False",
   "",
-  "def deregister(base_url, name, api_key):",
-  "    url = base_url.rstrip('/') + '/api/v1/agents/unregister'",
-  "    data = json.dumps({'agent_session_name': name}).encode()",
+  "def post_json(base_url, path, payload, api_key, timeout):",
+  "    url = base_url.rstrip('/') + path",
+  "    data = json.dumps(payload).encode()",
   "    req = urllib.request.Request(url, data=data, method='POST',",
   "          headers={'Content-Type': 'application/json'})",
   "    if api_key:",
   "        req.add_header('X-Api-Key', api_key)",
   "        req.add_header('Authorization', f'Bearer {api_key}')",
+  "    with urllib.request.urlopen(req, timeout=timeout) as r:",
+  "        return r.read()",
+  "",
+  "def bridge_session(base_url, dataset_name, session_id, api_key):",
+  "    # Bridge the server-side session cache into the permanent graph BEFORE",
+  "    # unregistering: unregister may drop activeAgents to 0, and in",
+  "    # COGNEE_AGENT_MODE the server then shuts down mid-pipeline.",
+  "    # run_in_background=false so the call returns only when the bridge is done.",
   "    try:",
-  "        with urllib.request.urlopen(req, timeout=10) as r:",
-  "            body = r.read()",
+  "        body = post_json(base_url, '/api/v1/improve',",
+  "            {'dataset_name': dataset_name, 'session_ids': [session_id],",
+  "             'run_in_background': False}, api_key, 120)",
+  "        log(f'improve ok session={session_id} body={body.decode()[:200]}')",
+  "    except Exception as e:",
+  "        log(f'improve error session={session_id} type={type(e).__name__} err={e}')",
+  "",
+  "def deregister(base_url, name, api_key):",
+  "    try:",
+  "        body = post_json(base_url, '/api/v1/agents/unregister',",
+  "            {'agent_session_name': name}, api_key, 10)",
   "        log(f'deregister ok name={name} body={body.decode()[:200]}')",
   "    except Exception as e:",
   "        log(f'deregister error name={name} type={type(e).__name__} err={e}')",
@@ -329,6 +346,8 @@ const EXIT_WATCHER_CONTENT = [
   "base_url = str(a.get('base_url', 'http://localhost:8011'))",
   "api_key = str(a.get('api_key', '') or '')",
   "pidfile = str(a.get('pidfile', ''))",
+  "dataset_name = str(a.get('dataset_name', '') or '')",
+  "cognee_session_id = str(a.get('cognee_session_id', '') or '')",
   "",
   "if not gw_pid or not name or not pidfile:",
   "    log(f'bad args gw_pid={gw_pid} name={name} pidfile={pidfile}'); sys.exit(0)",
@@ -346,6 +365,8 @@ const EXIT_WATCHER_CONTENT = [
   "",
   "if owns_pidfile(pidfile):",
   "    log(f'gateway dead, deregistering name={name}')",
+  "    if dataset_name and cognee_session_id:",
+  "        bridge_session(base_url, dataset_name, cognee_session_id, api_key)",
   "    deregister(base_url, name, api_key)",
   "    try: os.unlink(pidfile)",
   "    except Exception: pass",
@@ -360,8 +381,10 @@ export function exitWatcherPidfilePath(agentSessionName: string): string {
 }
 
 /**
- * Spawn a detached exit-watcher that calls /api/v1/agents/unregister for
- * agentSessionName when the gateway process (gatewayPid) exits for any reason.
+ * Spawn a detached exit-watcher that fires when the gateway process
+ * (gatewayPid) exits for any reason. If datasetName + cogneeSessionId are
+ * given, it first bridges that session's cache into the graph via
+ * /api/v1/improve, then calls /api/v1/agents/unregister for agentSessionName.
  * Returns immediately — the actual watcher runs as a separate OS process.
  * Signal clean deregistration by deleting the pidfile (exitWatcherPidfilePath);
  * the watcher detects the missing pidfile and self-exits without making an HTTP call.
@@ -372,6 +395,8 @@ export async function spawnExitWatcher(params: {
   baseUrl: string;
   apiKey?: string;
   pidfilePath: string;
+  datasetName?: string;
+  cogneeSessionId?: string;
   logger: { warn?: (msg: string) => void };
 }): Promise<void> {
   try {
@@ -383,6 +408,8 @@ export async function spawnExitWatcher(params: {
       base_url: params.baseUrl,
       api_key: params.apiKey ?? "",
       pidfile: params.pidfilePath,
+      dataset_name: params.datasetName ?? "",
+      cognee_session_id: params.cogneeSessionId ?? "",
     });
     const python = findSystemPython();
     const result = await runPluginCommandWithTimeout({
@@ -404,7 +431,7 @@ export async function spawnExitWatcher(params: {
  */
 export async function waitForServerHealth(
   baseUrl: string,
-  timeoutMs = 180_000,
+  timeoutMs = 600_000,
 ): Promise<void> {
   const healthUrl = `${baseUrl.replace(/\/$/, "")}/health`;
   const deadline = Date.now() + timeoutMs;

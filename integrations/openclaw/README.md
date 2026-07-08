@@ -13,7 +13,7 @@ OpenClaw plugin that adds Cognee-backed memory with **multi-scope support** (com
 - **Lazy dataset resolution**: On first prompt, if a dataset UUID is not cached locally, the plugin queries the Cognee server by name so you can connect to any pre-existing dataset without manual configuration
 - **Health check**: Verifies Cognee API connectivity before operations
 - **Auto-index**: Syncs memory markdown files to Cognee via `/remember` (add new, update changed, forget removed, skip unchanged). The `/remember` endpoint runs ingest, graph build, and graph enrichment in one server-side call.
-- **In-session memory**: Each recall call auto-captures the turn as a `QAEntry` in Cognee's session cache; with `AUTO_FEEDBACK=true` set on the Cognee container, follow-up messages are auto-classified as feedback and attached to the previous QA; `session_end` triggers `/improve` to bridge the session cache into the graph
+- **In-session memory**: Every tool call is stored as a `TraceEntry` and every prompt/answer pair as a `QAEntry` in Cognee's session cache (`captureSession`, on by default); with `AUTO_FEEDBACK=true` set on the Cognee container, follow-up messages are auto-classified as feedback and attached to the previous QA; `session_end` triggers `/improve` to bridge the session cache into the graph
 - **One-command setup**: `openclaw cognee setup` configures Cognee as the sole memory provider
 - **CLI commands**: `openclaw cognee setup`, `openclaw cognee index`, `openclaw cognee status`, `openclaw cognee health`, `openclaw cognee scopes`, `openclaw cognee forget`, `openclaw cognee improve`
 
@@ -163,7 +163,24 @@ For a gateway with multiple named agents sharing a default dataset:
 
 > **Required fields when adding a `models.providers.<provider>` block**: `baseUrl` is required by the config schema. Omitting it causes a validation error that prevents the gateway from starting.
 
-For multi-agent gateways, set `perAgentMemory: true` explicitly to give each agent its own isolated dataset. Without it, all agents share a single dataset regardless of how many are configured.
+#### Default: all agents share one dataset
+
+By default — no matter how many agents are configured — every agent reads and writes the **same dataset** (`agent_sessions`), exactly like the claude-code and codex Cognee integrations. Agents stay distinguishable within it: each agent session registers separately and its conversation is keyed by its own Cognee session id, so recall and session bridging never mix sessions up. Shared memory is usually what you want: agents benefit from each other's knowledge.
+
+#### Opt-in: per-agent isolated datasets
+
+To give each agent its own dataset (own graph, own recall space), set **both** of these in the plugin config:
+
+```json
+"config": {
+  "perAgentMemory": true,
+  "agentDatasetPrefix": "myorg-agent"
+}
+```
+
+With this, agent `Will` writes to dataset `myorg-agent-will`, agent `Elizabeth` to `myorg-agent-elizabeth`, and each agent's recall only searches its own dataset (plus any shared `company`/`user` scopes you configure). Use `agentDatasetTemplate` (e.g. `"{agentId}"`) instead of the prefix if you need full control over the dataset names.
+
+> **Both settings are required.** `perAgentMemory: true` on its own does nothing — isolation only activates when an `agentDatasetPrefix` or `agentDatasetTemplate` is also set. Per-agent memory is never enabled automatically.
 
 ### Cognee Cloud
 
@@ -312,7 +329,7 @@ This lets the agent distinguish between personal context, shared knowledge, and 
 | `recallScopes` | string[] | `["agent","user","company"]` | Scopes to search during recall, in priority order |
 | `defaultWriteScope` | string | `agent` | Default scope for files not matching any route |
 | `scopeRouting` | object[] | (see above) | Path-to-scope routing rules |
-| `perAgentMemory` | boolean | `false` | Give each agent its own dataset via `agentDatasetPrefix`. Must be set explicitly to `true` for multi-agent gateways that require dataset isolation. |
+| `perAgentMemory` | boolean | `false` | Give each agent its own dataset. Strictly opt-in (never auto-enabled); requires `agentDatasetPrefix` or `agentDatasetTemplate` to also be set — see "Multi-Agent Quick Start". By default all agents share one dataset. |
 
 ### Sessions
 
@@ -320,12 +337,13 @@ This lets the agent distinguish between personal context, shared knowledge, and 
 |--------|------|---------|-------------|
 | `enableSessions` | boolean | `true` | Enable session-based conversation tracking |
 | `persistSessionsAfterEnd` | boolean | `true` | Persist session Q&A into the knowledge graph |
+| `captureSession` | boolean | `true` | Store each tool call as a `TraceEntry` and each prompt/answer pair as a `QAEntry` in Cognee's session cache (requires `enableSessions`) |
 
 ### Search
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `searchType` | string | `GRAPH_COMPLETION` | Search strategy (see below) |
+| `searchType` | string | `HYBRID_COMPLETION` | Search strategy (see below) |
 | `maxResults` | number | `3` | Max memories to inject per scope (sent as `top_k` to Cognee) |
 | `minScore` | number | `0.3` | Minimum relevance score filter |
 | `maxTokens` | number | `512` | Token cap for recall per scope |
@@ -336,7 +354,8 @@ This lets the agent distinguish between personal context, shared knowledge, and 
 
 | Type | Description |
 |------|-------------|
-| `GRAPH_COMPLETION` | **Default** — graph traversal + LLM reasoning |
+| `HYBRID_COMPLETION` | **Default** — combined vector + graph retrieval |
+| `GRAPH_COMPLETION` | Graph traversal + LLM reasoning; slower but deeper — best for offline/CLI queries rather than the per-prompt recall path |
 | `CHUNKS` | Semantic vector search, returns raw stored text (no generation) |
 | `FEELING_LUCKY` | Auto-selects a strategy per query (may pick generative modes) |
 | `GRAPH_COMPLETION_COT` | Chain-of-thought reasoning over graph (iterative) |
@@ -368,6 +387,17 @@ This lets the agent distinguish between personal context, shared knowledge, and 
 |--------|------|---------|-------------|
 | `requestTimeoutMs` | number | `60000` | HTTP timeout for Cognee requests |
 | `ingestionTimeoutMs` | number | `300000` | HTTP timeout for add/update requests |
+
+### Recall budget & circuit breaker
+
+Recall runs on the prompt hot path, so it is bounded: each recall call gets a short timeout, the whole recall step gets a wall-clock budget, and repeated failures open a circuit breaker that skips recall until the server recovers. Memories missed under the budget are dropped for that turn only — writes (traces, QA, file sync, improve) are never budgeted. The breaker state is shared with the claude-code and codex integrations via `~/.cognee-plugin/recall-breaker.json`, so all plugins using one Cognee server back off together.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `recallTimeoutMs` | number | `2500` | Per recall HTTP call timeout (no retries) |
+| `recallBudgetMs` | number | `4000` | Overall wall-clock budget for the recall step per prompt |
+| `recallBreakerThreshold` | number | `5` | Consecutive failures (network/timeout/5xx) before the breaker opens |
+| `recallBreakerCooldownMs` | number | `120000` | How long recall is skipped once the breaker opens |
 
 Note: Files are stored in Cognee using sanitized relative paths as filenames (e.g., `MEMORY.md.txt` for `MEMORY.md`, `memory.tools.md.txt` for `memory/tools.md`) for easy identification and to avoid path separator issues.
 
